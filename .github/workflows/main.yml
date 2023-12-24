@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 */6 * * *"
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Download ngrok
+      run: Invoke-WebRequest https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
+
+    - name: Extract ngrok
+      run: Expand-Archive ngrok.zip
+
+    - name: Set up ngrok
+      run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
+      env:
+        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+
+    - name: Enable RDP
+      run: |
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+        Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
+
+    - name: Start ngrok
+      run: |
+        Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389 --authtoken $Env:NGROK_AUTH_TOKEN --config .\ngrok\ngrok.yml start --all --time 21600" -NoNewWindow -Wait
+
+    - name: Reconnect RDP
+      run: |
+        $ErrorActionPreference = "Stop"
+        $rdpSession = $null
+        $isConnected = $false
+        while(!$isConnected) {
+          try {
+            $ngrokOutput = .\ngrok\ngrok.exe tcp 3389 --log stdout
+            $ngrokResult = $ngrokOutput | Select-String -Pattern 'Forwarding\s+tcp://(.*?):(.*?)\s+->\s+localhost:3389'
+            $ngrokAddress = $ngrokResult.Matches.Groups[1].Value
+            $rdpSession = New-Object -ComObject "MsTscAx.MsTscAx"
+            $rdpSession.Server = "$ngrokAddress.tcp.ngrok.io"
+            $rdpSession.UserName = "runneradmin"
+            $rdpSession.AdvancedSettings9.ClearTextPassword = "P@ssw0rd!"
+            $rdpSession.Connect()
+            while($rdpSession.ConnectedState -ne 1) {
+              Start-Sleep -Seconds 1
+            }
+            $isConnected = $true
+          } catch {
+            Write-Host "Failed to connect: $_"
+            Start-Sleep -Seconds 10
+          } finally {
+            if ($rdpSession.ConnectedState -eq 1) {
+              $rdpSession.Disconnect()
+            }
+            $rdpSession.Dispose()
+          }
+        }
